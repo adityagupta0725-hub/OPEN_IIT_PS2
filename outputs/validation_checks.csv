@@ -1,0 +1,25 @@
+check,status,detail
+unique accounts.account_id,PASS,2400 unique of 2400
+unique splits.account_id,PASS,2400 unique of 2400
+unique dial_attempts.attempt_id,PASS,51105 unique of 51105
+unique field_visits.visit_id,PASS,5578 unique of 5578
+unique payments.payment_id,PASS,2162 unique of 2162
+unique addresses.address_id,PASS,3117 unique of 3117
+unique skip_traces.trace_id,PASS,766 unique of 766
+"unique (account_id, phone_id)",PASS,5719 unique of 5719
+phone_id may repeat across accounts,PASS,"175 phone rows share a phone_id with another account; key remains (account_id, phone_id)"
+phone_masked is not an id,PASS,4339 masked values for 5618 phone ids
+dial account_id in accounts,PASS,orphans=0
+"dial (account, phone) in phones",PASS,orphans=0
+"visit (account, address) in addresses",PASS,orphans=0
+"verified (account, phone) in phones",PASS,orphans=0
+new trace id in phones or addresses,PASS,missing=0 of 175
+splits cover every account,PASS,split rows=2400 accounts=2400
+agent_id on dials exists,PASS,dial agents
+lender_id exists,PASS,account lenders
+dial timestamps inside 1 Apr–29 Jun 2026,PASS,outside=0
+verified_date is 2 Jul 2026,PASS,"[datetime.date(2026, 7, 2)]"
+outstanding > 0,PASS,min=6300.0
+payment amount > 0,PASS,min=50.0
+ring duration outside 0–45s,PASS,bad=0
+talk time inconsistent with network response,PASS,bad=0
