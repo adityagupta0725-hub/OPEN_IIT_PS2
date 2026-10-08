@@ -1,0 +1,13 @@
+channel,ps_state,ps_category,threshold,response
+phone,valid_reachable,Phone: Valid and reachable,0.4,"Keep dialling, at the best time slot"
+phone,valid_avoiding,"Phone: Valid, but borrower avoiding",0.4,"Switch channel (WhatsApp, field) instead of redialling"
+phone,temp_unreachable,Phone: Temporarily unreachable,0.45,"Retry later, with backoff"
+phone,off_long_term,Phone: Switched off long-term,0.5,"Move to another number, or trace"
+phone,recycled_or_wrong,Phone: Recycled to a new subscriber,0.8,Stop at once; there is a risk of disclosing the debt to a stranger
+phone,third_party,"Phone: Third party (relative, employer, reference)",0.45,"Use only within Fair Practices Code rules, never discuss the debt"
+phone,invalid,Phone: Invalid from the start,0.5,Trace
+address,valid_occupied,Address: Valid and occupied,0.4,Visit
+address,valid_absent_usually,"Address: Valid, but borrower usually absent",0.4,Change the visit time
+address,moved,Address: Borrower has moved,0.4,Trace the new address
+address,hard_to_find,Address: Hard to find on the ground,0.4,Resolve the location (Problem Statement 3) before writing it off
+address,fabricated_or_incomplete,Address: Fabricated or incomplete at origination,0.4,"Trace, and flag to the origination team"
