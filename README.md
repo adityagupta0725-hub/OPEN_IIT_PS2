@@ -2,6 +2,8 @@
 
 > Source: CreditNirvana Problem Statement 2 (AI-native debt collections, India). This README is the implementation blueprint: architecture, repo layout, models, and the maths each module must implement.
 
+> **⚠️ IMPORTANT RUN INSTRUCTIONS:** The `modelling.ipynb` notebook contains the core mathematical pipeline, but **it should NOT be run manually or directly**. It is designed to be dynamically patched and executed by the automated utility scripts (`patch_notebook.py`, `patch_notebook2.py`, and `run_modelling.py`) which inject new experimental code (like `hmmlearn` Expectation-Maximization and hierarchical intents) automatically before execution.
+
 ---
 
 ## 1\. Problem summary
@@ -53,65 +55,32 @@ Skip-traces are ranked by the **expected recovery value** of finding the borrowe
 
 ---
 
-## 3\. System architecture
+## 3\. System architecture (Implemented Pipeline)
 
-Raw logs (dialer, dispositions, remarks, bot transcripts, field app, account records)
+The system is a layered probabilistic pipeline. Each layer feeds the next:
 
+\[1\] Ingestion \+ event table
         |
-
         v
-
-\[1\] Ingestion \+ event table  \----\>  \[2\] Label engine (weak supervision, PU)
-
-        |                                   |
-
-        v                                   v
-
-\[3\] Feature store (per contact point, per day) \<-- \[5\] Shared-contact graph
-
+\[2\] **Layer 1: Source–Relation Prior** (α₀, β₀ from group train rates)
         |
-
         v
-
-\[4\] State estimator
-
-      4a. Human-present GBDT          \\
-
-      4b. State GBDT (multiclass)      }--\> calibrated state posteriors
-
-      4c. Time dynamics (decay/hazard/HMM) /
-
-      4d. Recycled-number detector (CUSUM \+ text \+ graph) \--\> suppression list
-
+\[3\] **Layer 2: Beta–Bernoulli with Exponential Decay** (causal rolling rates with temporal decay λ=0.05/day)
         |
-
         v
-
-\[6\] Calibration (per contact-point type / portfolio)
-
+\[4\] **Layer 3: Logistic Regression (RPC)** (P(RPC | history, time, account) — acts as the grand integrator)
         |
-
         v
-
-\[7\] Decision policy (rule table over posteriors \+ compliance overrides)
-
-        |                         |
-
-        v                         v
-
-\[8\] Trace valuation (EVT)    \[9\] Exploration (Thompson sampling, propensity logging)
-
+\[5\] **Layer 4: Logistic Regression (Repayment)** (P(pay within 14d | RPC) using account features)
         |
-
         v
-
-\[10\] Outputs: dial list order, action \+ reason code, trace queue, suppression list, dashboard
-
+\[6\] **Layer 5: Continuous-Time HMM** (Tracks 5 hidden phone health states using matrix exponentials)
         |
-
         v
-
-\[11\] Evaluation (temporal split, IPS/DR, safety recall, business metrics)
+\[7\] **Account Roll-Up & Trace Valuation** (EVT gating)
+        |
+        v
+\[8\] **Outputs:** dial list order, action \+ reason code, trace queue, suppression list
 
 ---
 
@@ -310,81 +279,38 @@ Bipartite graph: borrowers on one side, contact points on the other.
 
 A number tied to many unrelated borrowers suggests a reference, shared, or recycled contact point.
 
-### 6.5 State estimator (`models/`)
+### 6.5 State estimator (Implemented Models)
 
-#### 6.5.1 Stage A: human present? (binary GBDT)
+The actual implemented state estimator follows a layered probabilistic approach rather than raw GBDTs.
 
-GBDT update:
-
-F\_0 \= initial prediction
-
-for m \= 1..M:
-
-    r\_i \= \- dL/dF (F\_{m-1}(x\_i))            \# residual / negative gradient
-
-    fit tree h\_m(x) to r
-
-    F\_m(x) \= F\_{m-1}(x) \+ eta \* h\_m(x)       \# eta \~ 0.05
-
-p \= sigmoid(F(x)) \= 1 / (1 \+ exp(-F(x)))
-
-Loss: log-loss \= \-\[ y log p \+ (1-y) log(1-p) \]
-
-Key evidence: ring then fast hangup, declined calls, silent pickups, cross-channel engagement imply a human is present (avoiding). No ring or network `does_not_exist` implies no human (invalid).
-
-#### 6.5.2 Stage B: which state? (multiclass GBDT)
-
-p\_k \= exp(F\_k) / sum\_j exp(F\_j)       \# softmax over K states
-
-Hierarchical combination:
-
-P(state \= k) \= P(human present) \* P(k | human present)     for human states
-
-P(state \= k) \= (1 \- P(human present)) \* P(k | no human)    for non-human states
-
-#### 6.5.3 Time dynamics (build in this order)
-
-**(A) Beta-Bernoulli with exponential decay (baseline)**
+#### 6.5.1 Layer 1 & 2: Bayesian Prior and Beta-Bernoulli with Exponential Decay
 
 weight\_i \= exp( \-lambda \* (t\_now \- t\_i) )
-
 alpha \= alpha\_0 \+ sum\_i weight\_i \* s\_i
-
 beta  \= beta\_0  \+ sum\_i weight\_i \* (1 \- s\_i)
-
 P(reachable) \= alpha / (alpha \+ beta)
 
-Var \= alpha\*beta / ( (alpha+beta)^2 \* (alpha+beta+1) )
+Confidence falls automatically as evidence ages. `lambda` is set to 0.05 per day. This provides pure call-history probability (`p_beta`).
 
-Confidence falls automatically as evidence ages. Tune `lambda` on validation data.
+#### 6.5.2 Layer 3: Logistic Regression (Next-Dial RPC Integrator)
 
-**(B) Discrete-time hazard / survival**
+P(RPC | x) \= sigmoid( w . x\_t \+ b )
 
-h(t | x) \= P( contact point fails at t | survived to t-1, x )
+This layer integrates the `p_beta` history with time-of-day features, categoricals, and account debt profile to produce the final probability of reaching the borrower on the next dial. Fitted via L-BFGS with L2 regularization.
 
-S(t) \= prod\_{u\<=t} ( 1 \- h(u | x\_u) )
+#### 6.5.3 Layer 4: Logistic Regression (Repayment Probability)
 
-Fit `h` with a GBDT or logistic regression on person-period rows (one row per contact point per day). `S(t)` is the probability the contact point is still valid at time t.
+P(pay within 14d | RPC) \= sigmoid( w\_r . x\_account \+ b\_r )
 
-**(C) Input-output HMM**
+Predicts the probability of actual payment conditional on reaching the borrower. Uses only account-level financial features (outstanding, emi_amount, etc.).
 
-- Hidden states: the phone state taxonomy.  
-- Covariate-dependent transitions:
+#### 6.5.4 Layer 5: Continuous-Time Input-Output HMM
 
-A\_ij(x\_t) \= exp( w\_ij . x\_t ) / sum\_k exp( w\_ik . x\_t )
-
-- Irregular gaps between attempts (continuous time): `A(dt) = expm( Q * dt )`, where Q is a rate matrix (`scipy.linalg.expm`).  
-- Forward filtering (live belief over states):
-
-alpha\_t(j)  proportional to  b\_j(o\_t) \* sum\_i alpha\_{t-1}(i) \* A\_ij
-
-normalise so  sum\_j alpha\_t(j) \= 1
-
-- Emission `b_j(o)`: product of independent terms (answered, ring bucket, network response, hour slot), or a GBDT output converted to a likelihood.  
-- Training: Baum-Welch (EM) if unsupervised, or maximum likelihood using soft labels from 6.2 if semi-supervised.  
-- Output: filtered posterior `alpha_t(.)`, which feeds the decision layer.
-
-**Recommended path:** ship (A), then (B) \+ (C) together. GBDT predicts per-attempt RPC probability given time slot and history, and the HMM tracks state with decay.
+- **Hidden states**: 5 phone health states (valid_reachable, valid_avoiding, temp_unreachable, off_long_term, invalid).
+- **Continuous time transitions**: Irregular gaps between attempts use continuous time `A(dt) = expm( Q * dt )`, where Q is a rate matrix (`scipy.linalg.expm`).  
+- **Forward filtering** (live belief over states):
+  alpha\_t(j)  proportional to  b\_j(o\_t) \* sum\_i alpha\_{t-1}(i) \* A\_ij
+- **Output**: filtered posterior `alpha_t(.)` representing the probability of the phone being in each of the 5 states today. This feeds directly into the decision policy layer.
 
 #### 6.5.4 Recycled-number detector (`models/recycled.py`)
 
